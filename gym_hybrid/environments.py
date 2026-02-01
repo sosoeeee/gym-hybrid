@@ -227,7 +227,8 @@ class BaseEnv(gym.Env):
         return state
 
     def get_reward(self, last_distance: float, goal: bool = False) -> float:
-        return (last_distance - self.distance) * self.proximity_reward_scalar - self.penalty + (1 if goal else 0)
+        # return (last_distance - self.distance) * self.proximity_reward_scalar - self.penalty + (1 if goal else 0)
+        return 1 if goal else 0
 
     @property
     def distance(self) -> float:
