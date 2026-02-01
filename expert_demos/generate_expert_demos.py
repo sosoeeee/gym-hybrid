@@ -96,8 +96,15 @@ def run_episode(env):
     start = (float(env.unwrapped.agent.x), float(env.unwrapped.agent.y), float(env.unwrapped.agent.theta))
     target = (float(env.unwrapped.target.x), float(env.unwrapped.target.y))
 
+    # Determine max parameter dimension across all action types
+    max_param_dim = max(
+        env.action_space.spaces[k].shape[0]
+        for k in env.action_space.spaces.keys()
+        if k != "id"
+    )
+
     obs = env.unwrapped.get_state()
-    obs_traj, ids, p0s, p1s, p2s, pcat = [], [], [], [], [], []
+    obs_traj, ids, p0s, p1s, p2s, pcat, pmax_list = [], [], [], [], [], [], []
     done = False
     steps = 0
     success = False
@@ -111,6 +118,20 @@ def run_episode(env):
         p1s.append(action["params1"].astype(np.float32))
         p2s.append(action["params2"].astype(np.float32))
         pcat.append(concat_params(action, env.action_space))
+        
+        # Create pmax: select parameter based on action_id, pad to max_param_dim
+        param_key = f"params{action_id}"
+        current_param = action[param_key].astype(np.float32)
+        # normalize parameter to -1 to 1 range for consistency
+        param_low = env.action_space.spaces[param_key].low
+        param_high = env.action_space.spaces[param_key].high
+        if len(param_low) == 0 or len(param_high) == 0:
+            current_param_norm = np.zeros_like(current_param, dtype=np.float32)
+        else:
+            current_param_norm = 2.0 * (current_param - param_low) / (param_high - param_low) - 1.0
+        pmax = np.zeros(max_param_dim, dtype=np.float32)
+        pmax[:len(current_param_norm)] = current_param_norm
+        pmax_list.append(pmax)
 
         obs, _, terminated, truncated, info = env.step(action)
         done = terminated or truncated
@@ -118,7 +139,7 @@ def run_episode(env):
             success = True
         steps += 1
 
-    return success, obs_traj, ids, p0s, p1s, p2s, pcat, start, target
+    return success, obs_traj, ids, p0s, p1s, p2s, pcat, pmax_list, start, target
 
 
 def main():
@@ -141,7 +162,7 @@ def main():
     attempts = 0
 
     while success < args.episodes and attempts < args.episodes * args.max_attempts:
-        ok, obs, ids, p0s, p1s, p2s, pcat, start, target = run_episode(env)
+        ok, obs, ids, p0s, p1s, p2s, pcat, pmax, start, target = run_episode(env)
         attempts += 1
         if not ok:
             continue
@@ -156,7 +177,8 @@ def main():
             params0=np.asarray(p0s, dtype=np.float32),
             params1=np.asarray(p1s, dtype=np.float32),
             params2=np.asarray(p2s, dtype=np.float32),
-            action_params=np.asarray(pcat, dtype=np.float32),
+            action_params=np.asarray(pmax, dtype=np.float32),
+            # params_max=np.asarray(pmax, dtype=np.float32),
             target=np.asarray(target, dtype=np.float32) if target is not None else np.asarray([], dtype=np.float32),
             start=np.asarray(start, dtype=np.float32) if start is not None else np.asarray([], dtype=np.float32),
         )
