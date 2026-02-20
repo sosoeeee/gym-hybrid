@@ -92,7 +92,7 @@ def expert_policy(obs, target_radius, env=None):
 
 def run_episode(env):
     # Reset environment and capture the initial start/target
-    env.reset()
+    obs, _ = env.reset()
     start = (float(env.unwrapped.agent.x), float(env.unwrapped.agent.y), float(env.unwrapped.agent.theta))
     target = (float(env.unwrapped.target.x), float(env.unwrapped.target.y))
 
@@ -103,23 +103,30 @@ def run_episode(env):
         if k != "id"
     )
 
-    obs = env.unwrapped.get_state()
-    obs_traj, ids, p0s, p1s, p2s, pcat, pmax_list = [], [], [], [], [], [], []
+    # Get observation from environment state
+    state = env.unwrapped.get_state()
+    
+    # Store step-level data (aligned with generate_demos.py format)
+    obs_list = []  # observations
+    action_ids = []  # action IDs
+    action_params = []  # normalized parameters (pmax format)
+    rewards = []
+    dones = []
+    infos = []
+    
     done = False
     steps = 0
     success = False
 
     while not done and steps < MAX_STEPS:
-        action_id, param = expert_policy(obs, env.unwrapped.target_radius, env)
+        action_id, param = expert_policy(state, env.unwrapped.target_radius, env)
         action = make_action(action_id, param, env.action_space)
-        obs_traj.append(obs)
-        ids.append(action_id)
-        p0s.append(action["params0"].astype(np.float32))
-        p1s.append(action["params1"].astype(np.float32))
-        p2s.append(action["params2"].astype(np.float32))
-        pcat.append(concat_params(action, env.action_space))
         
-        # Create pmax: select parameter based on action_id, pad to max_param_dim
+        # Store observation before action
+        obs_list.append(obs.copy())
+        action_ids.append(action_id)
+        
+        # Create normalized parameter in pmax format (aligned dimension)
         param_key = f"params{action_id}"
         current_param = action[param_key].astype(np.float32)
         # normalize parameter to -1 to 1 range for consistency
@@ -131,19 +138,26 @@ def run_episode(env):
             current_param_norm = 2.0 * (current_param - param_low) / (param_high - param_low) - 1.0
         pmax = np.zeros(max_param_dim, dtype=np.float32)
         pmax[:len(current_param_norm)] = current_param_norm
-        pmax_list.append(pmax)
+        action_params.append(pmax)
 
-        obs, _, terminated, truncated, info = env.step(action)
+        obs, reward, terminated, truncated, info = env.step(action)
+        state = env.unwrapped.get_state()
+        
+        rewards.append(float(reward))
+        dones.append(terminated or truncated)
+        infos.append(dict(info))
+        
         done = terminated or truncated
         if terminated and info.get("reward", 0) > 0:
             success = True
         steps += 1
 
-    return success, obs_traj, ids, p0s, p1s, p2s, pcat, pmax_list, start, target
+    return success, obs_list, action_ids, action_params, rewards, dones, infos, start, target
 
 
 def main():
     import argparse
+    import time
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--episodes", "-n", type=int, default=1, help="number of successful demos to collect")
@@ -158,36 +172,88 @@ def main():
 
     env = gym.make(ENV_ID)
 
-    success = 0
+    # Collect all episodes data (aligned with generate_demos.py format)
+    all_obs = []
+    all_action_ids = []
+    all_action_params = []
+    all_rewards = []
+    all_dones = []
+    all_infos = []
+    all_episode_ids = []
+    all_meta = []
+    
+    success_count = 0
     attempts = 0
 
-    while success < args.episodes and attempts < args.episodes * args.max_attempts:
-        ok, obs, ids, p0s, p1s, p2s, pcat, pmax, start, target = run_episode(env)
+    while success_count < args.episodes and attempts < args.episodes * args.max_attempts:
+        ok, obs_list, ids, params, rewards, dones, infos, start, target = run_episode(env)
         attempts += 1
         if not ok:
             continue
 
-        # create output dir if it does not exist
-        os.makedirs(args.output_dir, exist_ok=True)
-        out_name = os.path.join(args.output_dir, f"expert_demo_{success}.npz")
-        np.savez(
-            out_name,
-            obs=np.asarray(obs, dtype=np.float32),
-            action_id=np.asarray(ids, dtype=np.int64),
-            params0=np.asarray(p0s, dtype=np.float32),
-            params1=np.asarray(p1s, dtype=np.float32),
-            params2=np.asarray(p2s, dtype=np.float32),
-            action_params=np.asarray(pmax, dtype=np.float32),
-            # params_max=np.asarray(pmax, dtype=np.float32),
-            target=np.asarray(target, dtype=np.float32) if target is not None else np.asarray([], dtype=np.float32),
-            start=np.asarray(start, dtype=np.float32) if start is not None else np.asarray([], dtype=np.float32),
-        )
-        success += 1
+        # Accumulate step-level data
+        all_obs.extend(obs_list)
+        all_action_ids.extend(ids)
+        all_action_params.extend(params)
+        all_rewards.extend(rewards)
+        all_dones.extend(dones)
+        all_infos.extend(infos)
+        all_episode_ids.extend([success_count] * len(obs_list))
+        
+        # Store episode metadata
+        all_meta.append({
+            'start': np.asarray(start, dtype=np.float32) if start is not None else np.asarray([], dtype=np.float32),
+            'target': np.asarray(target, dtype=np.float32) if target is not None else np.asarray([], dtype=np.float32),
+            'steps': len(obs_list),
+        })
+        
+        success_count += 1
+        print(f"Collected expert demo {success_count}/{args.episodes} (attempt {attempts})")
 
     env.close()
 
-    if success < args.episodes:
+    if success_count < args.episodes:
         raise RuntimeError(f"Failed to collect {args.episodes} successful demo(s) after {attempts} attempts")
+
+    # Create output dir if it does not exist
+    os.makedirs(args.output_dir, exist_ok=True)
+    
+    # Save in the same format as generate_demos.py
+    ts = time.strftime('%Y%m%d_%H%M%S')
+    out_name = os.path.join(args.output_dir, f"expert_demos_{ENV_ID}_{success_count}_{ts}.npz")
+    
+    # Convert to numpy arrays
+    obs_array = np.asarray(all_obs, dtype=np.float32)
+    action_id_array = np.asarray(all_action_ids, dtype=np.int64)
+    action_params_array = np.asarray(all_action_params, dtype=np.float32)
+    rewards_array = np.asarray(all_rewards, dtype=np.float32)
+    dones_array = np.asarray(all_dones, dtype=np.bool_)
+    episode_id_array = np.asarray(all_episode_ids, dtype=np.int64)
+    info_array = np.asarray(all_infos, dtype=object)
+    meta_array = np.asarray(all_meta, dtype=object)
+    
+    # Compute success for each step (success at end of successful episodes)
+    success_array = np.zeros(len(all_obs), dtype=np.bool_)
+    for i, (done, ep_id) in enumerate(zip(all_dones, all_episode_ids)):
+        if done and ep_id < success_count:  # all collected episodes are successful
+            success_array[i] = True
+    
+    np.savez_compressed(
+        out_name,
+        obs=obs_array,
+        action_id=action_id_array,
+        action_params=action_params_array,
+        rewards=rewards_array,
+        dones=dones_array,
+        success=success_array,
+        episode_id=episode_id_array,
+        info=info_array,
+        meta=meta_array,
+    )
+    
+    print(f"\n✓ Saved {success_count} expert demos to {out_name}")
+    print(f"  Total steps: {len(all_obs)}")
+    print(f"  Success rate: {success_count}/{attempts} ({100*success_count/attempts:.1f}%)")
 
 
 if __name__ == "__main__":

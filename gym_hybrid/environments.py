@@ -192,8 +192,10 @@ class BaseEnv(gym.Env):
         elif id_ == BREAK:
             self.agent.break_()
 
+        is_success = False
         if self.distance < self.target_radius and self.agent.speed == 0:
             reward = self.get_reward(last_distance, True)
+            is_success = True
             terminated = True
         elif abs(self.agent.x) > self.field_size or abs(self.agent.y) > self.field_size or self.current_step > self.max_step:
             reward = -1
@@ -207,7 +209,7 @@ class BaseEnv(gym.Env):
             self.render()
 
         # add info to the return 
-        info = {'reward': reward, 'terminated': terminated, 'truncated': truncated}
+        info = {'reward': reward, 'terminated': terminated, 'truncated': truncated, 'is_success': is_success}
 
         return self.get_state(), reward, terminated, truncated, info
 
