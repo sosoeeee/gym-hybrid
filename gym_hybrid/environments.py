@@ -117,6 +117,7 @@ class BaseEnv(gym.Env):
         self.max_step = max_step
         self.field_size = 1.0
         self.target_radius = 0.1
+        self.speed_threshold = 0.1
         self.penalty = penalty
         self.proximity_reward_scalar = proximity_reward_scalar
 
@@ -158,7 +159,13 @@ class BaseEnv(gym.Env):
 
         self.action_converter = ActionConverter(parameterized_action_set)
         self.action_space = self.action_converter.gym_space_setting()
-        self.observation_space = spaces.Box(-np.ones(10), np.ones(10))
+        
+        # HER-compatible observation space
+        self.observation_space = spaces.Dict({
+            'observation': spaces.Box(-np.ones(8), np.ones(8), dtype=np.float32),
+            'achieved_goal': spaces.Box(-np.ones(3), np.ones(3), dtype=np.float32),
+            'desired_goal': spaces.Box(-np.ones(3), np.ones(3), dtype=np.float32),
+        })
 
     def reset(self, seed: Optional[int] = None, options: Optional[dict] = None):
         super().reset(seed=seed)
@@ -192,16 +199,19 @@ class BaseEnv(gym.Env):
         elif id_ == BREAK:
             self.agent.break_()
 
+        state = self.get_state()
+        achieved_goal = state['achieved_goal']
+        desired_goal = state['desired_goal']
+        reward = self.compute_reward(achieved_goal, desired_goal, {})
+
         is_success = False
-        if self.distance < self.target_radius and self.agent.speed == 0:
-            reward = self.get_reward(last_distance, True)
+        if reward > 0.0:
             is_success = True
             terminated = True
         elif abs(self.agent.x) > self.field_size or abs(self.agent.y) > self.field_size or self.current_step > self.max_step:
-            reward = -1
+            reward = -1.0
             terminated = True
         else:
-            reward = self.get_reward(last_distance)
             terminated = False
         truncated = False
 
@@ -213,24 +223,75 @@ class BaseEnv(gym.Env):
 
         return self.get_state(), reward, terminated, truncated, info
 
-    def get_state(self) -> list:
-        state = [
+    def get_state(self) -> Dict[str, np.ndarray]:
+        """
+        Get the current state in HER-compatible format.
+        
+        Returns:
+            Dict with 'observation', 'achieved_goal', and 'desired_goal'.
+        """
+        observation = np.array([
             self.agent.x,
             self.agent.y,
             self.agent.speed,
             np.cos(self.agent.theta),
             np.sin(self.agent.theta),
-            self.target.x,
-            self.target.y,
             self.distance,
             0 if self.distance > self.target_radius else 1,
             self.current_step / self.max_step
-        ]
-        return state
+        ], dtype=np.float32)
 
-    def get_reward(self, last_distance: float, goal: bool = False) -> float:
-        # return (last_distance - self.distance) * self.proximity_reward_scalar - self.penalty + (1 if goal else 0)
-        return 1 if goal else 0
+        achieved_goal = np.array([self.agent.x, self.agent.y, self.agent.speed], dtype=np.float32)
+        desired_goal = np.array([self.target.x, self.target.y, 0.0], dtype=np.float32)
+
+        return {
+            'observation': observation,
+            'achieved_goal': achieved_goal,
+            'desired_goal': desired_goal
+        }
+
+    # def get_reward(self, last_distance: float, goal: bool = False) -> float:
+    #     # return (last_distance - self.distance) * self.proximity_reward_scalar - self.penalty + (1 if goal else 0)
+    #     return 1 if goal else 0
+    
+    def compute_reward(self, achieved_goal: np.ndarray, desired_goal: np.ndarray, info: dict) -> Union[float, np.ndarray]:
+        """
+        Compute the reward for HER compatibility.
+        Supports both single and vectorized (batch) computation.
+        
+        Args:
+            achieved_goal: The achieved goal (agent position and speed).
+                          Shape: (3,) for single or (N, 3) for batch.
+            desired_goal: The desired goal (target position and speed).
+                         Shape: (3,) for single or (N, 3) for batch.
+            info: Additional information.
+            
+        Returns:
+            Reward: 1.0 if goal is reached, 0.0 otherwise.
+                   Returns float for single, ndarray for batch.
+        """
+        # Handle both single and batch cases
+        achieved_goal = np.atleast_2d(achieved_goal)
+        desired_goal = np.atleast_2d(desired_goal)
+        
+        # Compute distance between positions
+        distance = np.sqrt(
+            (achieved_goal[:, 0] - desired_goal[:, 0]) ** 2 +
+            (achieved_goal[:, 1] - desired_goal[:, 1]) ** 2
+        )
+        
+        # Compute speed difference
+        speed_diff = np.abs(achieved_goal[:, 2] - desired_goal[:, 2])
+        
+        # Goal is reached if within target radius and agent has stopped
+        rewards = np.where(
+            (distance < self.target_radius) & (speed_diff < self.speed_threshold),
+            1.0,
+            0.0
+        )
+        
+        # Return scalar if input was 1D, otherwise return array
+        return rewards.item() if rewards.shape[0] == 1 else rewards
 
     @property
     def distance(self) -> float:

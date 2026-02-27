@@ -70,7 +70,7 @@ def visualize_episode(env, ids, params, start, target, render_mode='gif', output
     """
     frames = [] if render_mode == 'gif' else None
     
-    obs, _ = env.reset()
+    obs_dict, _ = env.reset()
     
     # Set initial state if available
     if start is not None and start.size >= 3:
@@ -87,7 +87,7 @@ def visualize_episode(env, ids, params, start, target, render_mode='gif', output
     steps = min(len(ids), MAX_FRAMES)
     for i in range(steps):
         action = make_action_from_params(ids[i], params[i], env.action_space)
-        obs, _, terminated, truncated, _ = env.step(action)
+        obs_dict, _, terminated, truncated, _ = env.step(action)
         
         if render_mode == 'gif':
             frames.append(env.render())
