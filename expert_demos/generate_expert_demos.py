@@ -15,7 +15,7 @@ import gym_hybrid
 ENV_ID = "Moving-v0"
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "data")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
-MAX_STEPS = 200
+MAX_STEPS = 250
 
 
 def normalize_angle(angle: float) -> float:
@@ -95,7 +95,7 @@ def expert_policy(obs_dict, target_radius, env=None):
         est_stop_dist += s * delta_t
         s = max(0.0, s - break_value)
 
-    margin = max(0.05, target_radius)
+    margin = max(0.05, target_radius * 0.4)
     hysteresis = 0.1
 
     if distance <= est_stop_dist + margin:

@@ -85,17 +85,19 @@ def visualize_episode(env, ids, params, start, target, render_mode='gif', output
         env.render()
 
     steps = min(len(ids), MAX_FRAMES)
+    returns = 0
     for i in range(steps):
         action = make_action_from_params(ids[i], params[i], env.action_space)
-        obs_dict, _, terminated, truncated, _ = env.step(action)
-        
+        obs_dict, reward, terminated, truncated, infos = env.step(action)
+        returns += reward
+
         if render_mode == 'gif':
             frames.append(env.render())
         else:
             env.render()
             
         if terminated or truncated:
-            print(f"Episode {episode_num} ended at step {i+1}")
+            print(f"Episode {episode_num} ended at step {i+1} with return: {returns}")
             break
     
     if render_mode == 'gif' and output_path:

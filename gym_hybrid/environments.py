@@ -91,10 +91,11 @@ class BaseEnv(gym.Env):
             max_turn: float = np.pi/2,
             max_acceleration: float = 0.5,
             delta_t: float = 0.005,
-            max_step: int = 200,
+            max_step: int = 100,
             penalty: float = 0.001,
             break_value: float = 0.1,
             proximity_reward_scalar: float = 3.0,
+            reward_scale: float = 0.1,
     ):
         """Initialization of the gym environment.
 
@@ -106,6 +107,8 @@ class BaseEnv(gym.Env):
             max_step (int): Maximum number of steps in one episode.
             penalty (float): Score penalty given at the agent every step.
             break_value (float): Break value when performing break action.
+            proximity_reward_scalar (float): Scalar for proximity-based reward.
+            reward_scale (float): Global reward scaling factor.
         """
         # Agent Parameters
         self.max_turn = max_turn
@@ -120,6 +123,7 @@ class BaseEnv(gym.Env):
         self.speed_threshold = 0.1
         self.penalty = penalty
         self.proximity_reward_scalar = proximity_reward_scalar
+        self.reward_scale = reward_scale
 
         # Initialization
         self.target = None
@@ -163,8 +167,8 @@ class BaseEnv(gym.Env):
         # HER-compatible observation space
         self.observation_space = spaces.Dict({
             'observation': spaces.Box(-np.ones(8), np.ones(8), dtype=np.float32),
-            'achieved_goal': spaces.Box(-np.ones(3), np.ones(3), dtype=np.float32),
-            'desired_goal': spaces.Box(-np.ones(3), np.ones(3), dtype=np.float32),
+            'achieved_goal': spaces.Box(-np.ones(2), np.ones(2), dtype=np.float32),
+            'desired_goal': spaces.Box(-np.ones(2), np.ones(2), dtype=np.float32),
         })
 
     def reset(self, seed: Optional[int] = None, options: Optional[dict] = None):
@@ -202,24 +206,29 @@ class BaseEnv(gym.Env):
         state = self.get_state()
         achieved_goal = state['achieved_goal']
         desired_goal = state['desired_goal']
-        reward = self.compute_reward(achieved_goal, desired_goal, {})
+        info = {'speed': self.agent.speed}
+        reward = self.compute_reward(achieved_goal, desired_goal, info) * self.reward_scale
 
         is_success = False
-        if reward > 0.0:
-            is_success = True
-            terminated = True
-        elif abs(self.agent.x) > self.field_size or abs(self.agent.y) > self.field_size or self.current_step > self.max_step:
-            reward = -1.0
-            terminated = True
-        else:
-            terminated = False
         truncated = False
+        terminated = False
+        if self.current_step < self.max_step:
+            if abs(self.agent.x) > self.field_size or abs(self.agent.y) > self.field_size:
+                reward = -1.0 * self.reward_scale
+                terminated = True
+        else:
+            if reward > 0.0:
+                is_success = True
+            terminated = True
 
         if self.render_mode is not None:
             self.render()
 
         # add info to the return 
-        info = {'reward': reward, 'terminated': terminated, 'truncated': truncated, 'is_success': is_success}
+        info['reward'] = reward
+        info['terminated'] = terminated
+        info['truncated'] = truncated
+        info['is_success'] = is_success
 
         return self.get_state(), reward, terminated, truncated, info
 
@@ -241,8 +250,8 @@ class BaseEnv(gym.Env):
             self.current_step / self.max_step
         ], dtype=np.float32)
 
-        achieved_goal = np.array([self.agent.x, self.agent.y, self.agent.speed], dtype=np.float32)
-        desired_goal = np.array([self.target.x, self.target.y, 0.0], dtype=np.float32)
+        achieved_goal = np.array([self.agent.x, self.agent.y], dtype=np.float32)
+        desired_goal = np.array([self.target.x, self.target.y], dtype=np.float32)
 
         return {
             'observation': observation,
@@ -260,32 +269,37 @@ class BaseEnv(gym.Env):
         Supports both single and vectorized (batch) computation.
         
         Args:
-            achieved_goal: The achieved goal (agent position and speed).
-                          Shape: (3,) for single or (N, 3) for batch.
-            desired_goal: The desired goal (target position and speed).
-                         Shape: (3,) for single or (N, 3) for batch.
-            info: Additional information.
+            achieved_goal: The achieved goal (agent position).
+                          Shape: (2,) for single or (N, 2) for batch.
+            desired_goal: The desired goal (target position).
+                         Shape: (2,) for single or (N, 2) for batch.
+            info: Additional information (dict for single, list of dicts for batch).
             
         Returns:
-            Reward: 1.0 if goal is reached, 0.0 otherwise.
+            Reward: 0.0 if goal is reached, -1.0 otherwise.
                    Returns float for single, ndarray for batch.
         """
         # Handle both single and batch cases
         achieved_goal = np.atleast_2d(achieved_goal)
         desired_goal = np.atleast_2d(desired_goal)
         
+        # Extract speed from info (handle both dict and list of dicts)
+        if isinstance(info, dict):
+            # Single case: info is a dict
+            speed = np.array([info['speed']])
+        else:
+            # Batch case: info is a list of dicts
+            speed = np.array([inf['speed'] for inf in info])
+
         # Compute distance between positions
         distance = np.sqrt(
             (achieved_goal[:, 0] - desired_goal[:, 0]) ** 2 +
             (achieved_goal[:, 1] - desired_goal[:, 1]) ** 2
         )
         
-        # Compute speed difference
-        speed_diff = np.abs(achieved_goal[:, 2] - desired_goal[:, 2])
-        
         # Goal is reached if within target radius and agent has stopped
         rewards = np.where(
-            (distance < self.target_radius) & (speed_diff < self.speed_threshold),
+            (distance < self.target_radius) & (speed == 0.0),
             1.0,
             0.0
         )
@@ -347,9 +361,10 @@ class MovingEnv(BaseEnv):
             max_turn: float = np.pi/2,
             max_acceleration: float = 0.5,
             delta_t: float = 0.005,
-            max_step: int = 200,
+            max_step: int = 100,
             penalty: float = 0.001,
             break_value: float = 0.1,
+            reward_scale: float = 0.1,
     ):
 
         super(MovingEnv, self).__init__(
@@ -360,6 +375,7 @@ class MovingEnv(BaseEnv):
             max_step=max_step,
             penalty=penalty,
             break_value=break_value,
+            reward_scale=reward_scale,
         )
 
         self.agent = MovingAgent(
@@ -375,9 +391,10 @@ class SlidingEnv(BaseEnv):
             max_turn: float = np.pi/2,
             max_acceleration: float = 0.5,
             delta_t: float = 0.005,
-            max_step: int = 200,
+            max_step: int = 100,
             penalty: float = 0.001,
-            break_value: float = 0.1
+            break_value: float = 0.1,
+            reward_scale: float = 0.1,
     ):
 
         super(SlidingEnv, self).__init__(
@@ -387,7 +404,8 @@ class SlidingEnv(BaseEnv):
             delta_t=delta_t,
             max_step=max_step,
             penalty=penalty,
-            break_value=break_value
+            break_value=break_value,
+            reward_scale=reward_scale,
         )
 
         self.agent = SlidingAgent(
